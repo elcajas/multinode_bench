@@ -14,10 +14,10 @@
 #   EXTRA_ARGS=""           — any additional flags forwarded to the training script
 
 # Derive paths relative to this script's location so the benchmark works
-# wherever the parent directory is placed. Assumes internvideo_2_5/ and
+# wherever the parent directory is placed. Assumes internvideo25_hpc/ and
 # multinode_bench/ are always siblings (both under the same parent dir).
 BENCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REPO_DIR="$(cd "$(dirname "$0")/../../internvideo_2_5" && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/../../internvideo25_hpc" && pwd)"
 
 cd "$REPO_DIR"
 
