@@ -23,8 +23,8 @@ cd "$REPO_DIR"
 
 # --- Environment ---
 source /etc/profile.d/modules.sh
-module load cuda/12.4
-module load hpcx/2.20    # provides mpirun for multi-node launch
+module load cuda/12.6/12.6.2
+module load openmpi/4.1.7    # provides mpirun for multi-node launch
 conda activate iv25
 
 # Prevent each torchrun worker from spawning extra OpenMP threads (avoids CPU contention)
@@ -200,6 +200,7 @@ run_training() {
       --local_num_frames 1 \
       --num_tome_tokens 16 \
       --epochs ${EPOCHS} \
+      --max-steps ${MAX_STEPS} \
       ${EXTRA_ARGS}
   fi
 
