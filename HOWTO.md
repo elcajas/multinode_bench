@@ -18,7 +18,7 @@
 
 ## Step 1 — Submit benchmark jobs
 
-Submit from anywhere — `_common.sh` always `cd`s to the repo using an absolute path:
+Submit from the parent directory (the one containing both `multinode_bench/` and `internvideo25_hpc/`):
 
 ```bash
 qsub multinode_bench/jobs/bench_1node.sh

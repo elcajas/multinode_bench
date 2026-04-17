@@ -16,8 +16,8 @@
 # Derive paths relative to this script's location so the benchmark works
 # wherever the parent directory is placed. Assumes internvideo25_hpc/ and
 # multinode_bench/ are always siblings (both under the same parent dir).
-BENCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REPO_DIR="$(cd "$(dirname "$0")/../../internvideo25_hpc" && pwd)"
+BENCH_DIR="${PBS_O_WORKDIR}/multinode_bench"
+REPO_DIR="${PBS_O_WORKDIR}/internvideo25_hpc"
 
 cd "$REPO_DIR"
 
@@ -72,14 +72,14 @@ TOTAL_GPUS=$((GPUS_PER_NODE * NODES))
 
 # --- Output directory ---
 # Each run gets its own timestamped subdirectory to avoid overwriting previous results.
-JOB_NAME=$(basename "$0" .sh)
+JOB_NAME=${JOB_NAME:-$(basename "$0" .sh)}
 TIMESTAMP=$(date +"%y%m%d_%H%M%S")
 OUTPUT_DIR="${BENCH_DIR}/results/${JOB_NAME}/${TIMESTAMP}"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "${BENCH_DIR}/logs/${JOB_NAME}"
 
 # Save a copy of this job script alongside the outputs for reproducibility
-cp "$0" "${OUTPUT_DIR}/$(basename $0)"
+cp "$0" "${OUTPUT_DIR}/${JOB_NAME}.sh"
 
 # Redirect all stdout/stderr to run.log while also printing to the PBS log
 exec > >(tee "${OUTPUT_DIR}/run.log") 2>&1

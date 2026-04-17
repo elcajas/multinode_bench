@@ -18,5 +18,7 @@ MAX_STEPS=200
 
 # EXTRA_ARGS="--freeze-vit --freeze-llm"
 
-source "$(dirname $0)/../_common.sh"
+JOB_NAME="bench_4node"
+cd "$PBS_O_WORKDIR"
+source "${PBS_O_WORKDIR}/multinode_bench/_common.sh"
 run_training
