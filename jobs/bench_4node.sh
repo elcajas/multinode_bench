@@ -20,5 +20,5 @@ MAX_STEPS=200
 
 JOB_NAME="bench_4node"
 cd "$PBS_O_WORKDIR"
-source "${PBS_O_WORKDIR}/multinode_bench/_common.sh"
+source "${PBS_O_WORKDIR}/_common.sh"
 run_training

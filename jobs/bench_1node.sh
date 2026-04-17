@@ -25,5 +25,5 @@ MAX_STEPS=200   # stop after 200 optimizer steps; increase for more stable avera
 
 JOB_NAME="bench_1node"
 cd "$PBS_O_WORKDIR"
-source "${PBS_O_WORKDIR}/multinode_bench/_common.sh"
+source "${PBS_O_WORKDIR}/_common.sh"
 run_training

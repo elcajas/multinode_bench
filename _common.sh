@@ -16,8 +16,8 @@
 # Derive paths relative to this script's location so the benchmark works
 # wherever the parent directory is placed. Assumes internvideo25_hpc/ and
 # multinode_bench/ are always siblings (both under the same parent dir).
-BENCH_DIR="${PBS_O_WORKDIR}/multinode_bench"
-REPO_DIR="${PBS_O_WORKDIR}/internvideo25_hpc"
+BENCH_DIR="${PBS_O_WORKDIR}"
+REPO_DIR="$(dirname "${PBS_O_WORKDIR}")/internvideo25_hpc"
 
 cd "$REPO_DIR"
 

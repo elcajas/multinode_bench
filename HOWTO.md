@@ -18,12 +18,12 @@
 
 ## Step 1 — Submit benchmark jobs
 
-Submit from the parent directory (the one containing both `multinode_bench/` and `internvideo25_hpc/`):
+Submit from the `multinode_bench/` directory:
 
 ```bash
-qsub multinode_bench/jobs/bench_1node.sh
-qsub multinode_bench/jobs/bench_2node.sh
-qsub multinode_bench/jobs/bench_4node.sh
+qsub jobs/bench_1node.sh
+qsub jobs/bench_2node.sh
+qsub jobs/bench_4node.sh
 ```
 
 You can submit all three at once — they are independent.
