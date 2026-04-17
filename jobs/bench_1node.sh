@@ -7,7 +7,7 @@
 #PBS -l select=1
 #PBS -l walltime=02:00:00
 #PBS -j oe
-# (no #PBS -o — _common.sh writes run.log to the timestamped output dir)
+#PBS -o logs/bench_1node/
 
 # Dataset — pick one that's available in your paths.json.
 # Any size works: training stops at MAX_STEPS regardless of dataset length.

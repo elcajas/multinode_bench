@@ -7,7 +7,7 @@
 #PBS -l select=4
 #PBS -l walltime=02:00:00
 #PBS -j oe
-# (no #PBS -o — _common.sh writes run.log to the timestamped output dir)
+#PBS -o logs/bench_4node/
 
 # Keep DATASETS and training config identical to bench_1node.sh for fair comparison
 DATASETS="handyvqa"
