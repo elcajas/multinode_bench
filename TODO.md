@@ -5,28 +5,27 @@ Ordered by priority based on benchmark results
 
 ---
 
-## 1. Fix NCCL inter-node communication [CRITICAL]
+## 1. Re-run benchmarks with NCCL using IB RDMA [CRITICAL — ready to test]
 
-**Finding:** AllReduce adds ~7.5s/step on 2-node (40% of wall-clock). Scaling efficiency
-is 4.9% on 2-node and 2.1% on 4-node — multi-node is slower than single-node.
+**Root cause:** Previous experiments had `NCCL_SOCKET_IFNAME=ibp56s0`, but that
+interface does not exist on this cluster. The correct altname is `ibp35s0` (`ibs1`).
+NCCL silently fell back to `bond0` — bonded 1GbE Ethernet — causing ~7.5s of
+AllReduce overhead per step and 2–4% scaling efficiency.
 
-**Action:** Check if InfiniBand is available on compute nodes:
-```bash
-ibstat | grep "Port State"
-ip link show | grep -E "^[0-9]+: (ib|mlx)"
+**Cluster network facts:**
+- IB HCA: `mlx5_0` (Mellanox ConnectX, active MTU 4096)
+- IPoIB interface: `ibs1` / `ibp35s0` (MTU 2044)
+- `bond0`: two bonded 1GbE links (MTU 1500) — previous fallback, too slow
+
+**Fix applied in `_common.sh`:**
+- Removed `NCCL_SOCKET_IFNAME=bond0` (was causing the fallback)
+- Added `NCCL_IB_HCA=mlx5_0` to pin the IB HCA explicitly
+- Added `NCCL_DEBUG=INFO` to confirm IB is used at runtime
+
+**Verification:** After re-running, check `run.log` for:
 ```
-If available, edit `_common.sh`:
-```bash
-# Change:
-export NCCL_SOCKET_IFNAME=bond0
-# To:
-export NCCL_SOCKET_IFNAME=ib0
-# Or remove the line entirely (NCCL auto-selects IB over Ethernet when present)
-```
-If only Ethernet is available, also try:
-```bash
-export NCCL_ALGO=Ring
-export NCCL_NET_GDR_LEVEL=0
+[0] NCCL INFO Using network IB    ← correct
+[0] NCCL INFO Using network Socket ← still falling back, investigate further
 ```
 
 ---
@@ -52,34 +51,33 @@ behind NCCL overhead; will become the dominant bottleneck once NCCL is fixed.
 - bench_4node: 3.74s (17%)
 
 Likely sources: MPI barrier synchronization, ZeRO-2 parameter gather/scatter.
+May reduce significantly after fixing NCCL (item 1).
 
-**Action:** Add timing instrumentation around ZeRO gather/scatter in the training
-script. Check `mpirun --mca` options for unnecessary collective operations.
-
----
-
-## 4. Fix analyze.py to use wall-clock (max rank) step time [DONE]
-
-Per-rank log files (`rank*.log`) are now parsed and step time is computed as
-`max(time across all ranks)` — the true wall-clock cost. Previously only rank 0
-was used, which could underestimate by ~20% on step 1.
+**Action:** Re-check after item 1. If it persists, add timing instrumentation
+around ZeRO gather/scatter in the training script and check `mpirun --mca` options.
 
 ---
 
-## 5. Monitor step time variance after fixing NCCL [LOW]
+## 4. Monitor step time variance after fixing NCCL [LOW]
 
-**Finding:** Step time coefficient of variation is 37% on 2-node and 44% on 4-node
-— network is inconsistent between steps.
+**Finding:** Step time CV is 37% on 2-node and 44% on 4-node. Expected to drop
+once NCCL uses IB RDMA instead of 1GbE Ethernet.
 
-**Action:** Re-run benchmarks after fixing NCCL (item 1) and check if variance
-drops. If it persists, investigate shared network contention with cluster admins.
+**Action:** Re-run after item 1 and check if variance drops below 15%.
 
 ---
 
-## 6. Forward pass load imbalance [LOW / MONITOR]
+## 5. Forward pass load imbalance [LOW / MONITOR]
 
-**Finding:** `forward_time` std across ranks is ~6-7% — currently not a significant
-problem. `--group-by-length` is working adequately.
+**Finding:** `forward_time` std across ranks is ~6-7% — not a significant problem.
 
 **Action:** No immediate action needed. Re-check after fixing NCCL; if imbalance
 grows above 20%, tighten group-by-length bin sizes or consider sequence packing.
+
+---
+
+## Completed
+
+- **analyze.py** updated to use per-rank logs for true wall-clock step time
+  (max across ranks), with AllReduce overhead, load imbalance, unaccounted time,
+  and prioritized recommendations.

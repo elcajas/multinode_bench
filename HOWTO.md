@@ -115,27 +115,30 @@ Prioritized list of bottlenecks with concrete fix commands.
 
 ## Network interface (NCCL)
 
-`_common.sh` sets `NCCL_SOCKET_IFNAME=bond0` (bonded Ethernet, the ABCI default).
-If the cluster has **InfiniBand**, switching will dramatically reduce AllReduce cost:
+**Cluster network facts:**
+- IB HCA: `mlx5_0` (Mellanox ConnectX, active MTU 4096)
+- IPoIB interface: `ibs1` / `ibp35s0` (MTU 2044)
+- `bond0`: two bonded 1GbE links (MTU 1500) — too slow for NCCL
 
+`_common.sh` sets `NCCL_IB_HCA=mlx5_0` to pin the IB HCA and lets NCCL use
+IB RDMA verbs directly (the fastest path). `NCCL_DEBUG=INFO` is also set so
+the selected transport is printed at job startup.
+
+**Verify IB is being used** by checking `run.log` after a job completes:
 ```bash
-# Check if InfiniBand is available on a compute node:
-ibstat | grep "Port State"
+grep "Using network" results/bench_2node/*/run.log
+# Should show:
+# [0] NCCL INFO Using network IB
+```
+
+**If NCCL falls back to Socket** (e.g. after a cluster change), diagnose with:
+```bash
+ibv_devinfo | grep -E "hca_id|port_state|active_mtu"
 ip link show | grep -E "^[0-9]+: (ib|mlx)"
-
-# In multinode_bench/_common.sh, change:
-export NCCL_SOCKET_IFNAME=bond0   # Ethernet
-# to:
-export NCCL_SOCKET_IFNAME=ib0     # InfiniBand
-# or remove the line entirely to let NCCL auto-select (prefers IB over Ethernet):
-# (remove the NCCL_SOCKET_IFNAME line)
 ```
 
-If only Ethernet is available, also try:
-```bash
-export NCCL_ALGO=Ring
-export NCCL_NET_GDR_LEVEL=0
-```
+> **Note:** `NCCL_SOCKET_IFNAME` controls only the TCP socket *fallback* transport,
+> not IB RDMA. For IB performance, `NCCL_IB_HCA` is the correct knob.
 
 ---
 

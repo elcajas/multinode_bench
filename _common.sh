@@ -33,8 +33,20 @@ export OMP_NUM_THREADS=1
 export DISABLE_ADDMM_CUDA_LT=1
 # Use cuDNN heuristic mode B for convolution algorithm selection
 export TORCH_CUDNN_USE_HEURISTIC_MODE_B=1
-# Tell NCCL to use the bonded network interface for inter-node communication on ABCI
-export NCCL_SOCKET_IFNAME=bond0
+# Inter-node NCCL transport.
+# IB HCA: mlx5_0 (Mellanox ConnectX, active MTU 4096).
+# IPoIB interface: ibs1 (altname ibp35s0), MTU 2044.
+# bond0 is bonded 1GbE Ethernet — too slow, never use for NCCL.
+#
+# Previous runs had NCCL_SOCKET_IFNAME=ibp56s0, which does not exist on this
+# cluster (correct altname is ibp35s0). NCCL silently fell back to bond0,
+# causing ~7.5s AllReduce overhead.
+#
+# With NCCL_SOCKET_IFNAME unset, NCCL auto-detects mlx5_0 and uses IB RDMA
+# verbs directly. NCCL_IB_HCA pins the HCA explicitly to avoid ambiguity.
+# NCCL_DEBUG=INFO prints the selected transport at startup — confirm "Using network IB".
+export NCCL_IB_HCA=mlx5_0
+export NCCL_DEBUG=INFO
 # Keep Triton kernel cache local
 export TRITON_CACHE_DIR="tmp/triton"
 # Make repo importable without installing
