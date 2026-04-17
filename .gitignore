@@ -1,0 +1,14 @@
+# Benchmark outputs — large and run-specific, not tracked
+results/
+
+# PBS scheduler logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# macOS
+.DS_Store

@@ -40,8 +40,8 @@ qstat -f <job_id>            # full details for a specific job
 tail -f multinode_bench/results/bench_1node/*/run.log
 ```
 
-Each job runs for exactly 200 optimizer steps then exits (controlled by `MAX_STEPS`).
-Expected wall-clock time per job: 10–30 min depending on GPU count and node configuration.
+Each job runs for exactly `MAX_STEPS` optimizer steps then exits (default 200).
+Expected wall-clock time per job: 10–30 min depending on GPU count and configuration.
 
 ---
 
@@ -55,21 +55,28 @@ cd /groups/input/internvideo25/multinode_bench
 # Auto-discover all completed runs and compare:
 python3 analyze.py --auto
 
-# Or point to specific log files:
+# Or point to specific run directories:
 python3 analyze.py \
-    "1-node=results/bench_1node/<timestamp>/run.log" \
-    "2-node=results/bench_2node/<timestamp>/run.log" \
-    "4-node=results/bench_4node/<timestamp>/run.log"
+    "1-node=results/bench_1node/<timestamp>" \
+    "2-node=results/bench_2node/<timestamp>" \
+    "4-node=results/bench_4node/<timestamp>"
 ```
+
+The analyzer uses **per-rank log files** when available
+(`results/<job>/<timestamp>/<timestamp2>/rank*.log`), measuring wall-clock step
+time as `max(time across all ranks)`. Falls back to `run.log` (rank-0 only) if
+per-rank logs are absent.
 
 ---
 
 ## Understanding the output
 
-### Throughput table
-Shows steps/sec and tokens/sec per run. Higher is better.
+### 1. Throughput table
+Shows wall-clock steps/sec and tokens/sec per run. Higher is better.
+`Variance%` is the coefficient of variation of step times — high values (>25%)
+indicate network instability or load imbalance.
 
-### Time breakdown
+### 2. Step time breakdown
 Shows what fraction of each step is spent in each phase:
 
 | Phase | What it means |
@@ -79,43 +86,71 @@ Shows what fraction of each step is spent in each phase:
 | `forward` | Forward pass (compute) |
 | `backward` | Backward pass **+ NCCL AllReduce** (gradient sync across GPUs/nodes) |
 | `optim` | Optimizer step (ZeRO parameter update) |
+| `unaccnt` | Unaccounted time (MPI barriers, ZeRO gather/scatter overhead) |
 
-### Scaling efficiency table
+### 3. AllReduce overhead
+Isolates the inter-node communication cost:
+```
+allreduce_cost = backward_time[run] − backward_time[1-node baseline]
+```
+The 1-node backward has no inter-node AllReduce, so the delta is pure communication overhead.
+
+### 4. Forward pass load imbalance
+`imbalance% = std(forward_time across ranks) / max(forward_time)` per step.
+High values mean `--group-by-length` is assigning very different sequence lengths
+to different ranks — the slowest rank stalls everyone at the AllReduce barrier.
+
+### 5. Scaling efficiency
 ```
 Efficiency = actual_speedup / ideal_speedup
 ```
-- **> 80%** — good scaling, multi-node is working well
+- **> 80%** — good scaling
 - **50–80%** — moderate; check the flagged bottleneck phase
-- **< 50%** — poor scaling; bottleneck phase tells you what to fix
+- **< 50%** — poor scaling
 
-### Bottleneck interpretation
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `backward` time grows with nodes | Inter-node NCCL bandwidth | Check `NCCL_SOCKET_IFNAME` (see note below) |
-| `data` time is high and constant | Shared filesystem I/O saturation | Use LMDB datasets, pre-copy to `/local1` |
-| `forward` time dominates, scales well | Compute-bound | No problem — this is ideal |
-| Low efficiency even on 2 nodes | MPI not distributing correctly | Verify `--map-by node` and PBS_NODEFILE |
+### 6. Recommendations
+Prioritized list of bottlenecks with concrete fix commands.
 
 ---
 
 ## Network interface (NCCL)
 
-`_common.sh` sets `NCCL_SOCKET_IFNAME=bond0` (bonded Ethernet, the default on ABCI).
-If the real server has **InfiniBand**, changing this will significantly reduce `backward_time`:
+`_common.sh` sets `NCCL_SOCKET_IFNAME=bond0` (bonded Ethernet, the ABCI default).
+If the cluster has **InfiniBand**, switching will dramatically reduce AllReduce cost:
 
 ```bash
+# Check if InfiniBand is available on a compute node:
+ibstat | grep "Port State"
+ip link show | grep -E "^[0-9]+: (ib|mlx)"
+
 # In multinode_bench/_common.sh, change:
 export NCCL_SOCKET_IFNAME=bond0   # Ethernet
 # to:
 export NCCL_SOCKET_IFNAME=ib0     # InfiniBand
-# or let NCCL auto-select (prefers IB over Ethernet if available):
-# (remove the NCCL_SOCKET_IFNAME line entirely)
+# or remove the line entirely to let NCCL auto-select (prefers IB over Ethernet):
+# (remove the NCCL_SOCKET_IFNAME line)
 ```
 
-Note: `backward_time` in the logs includes both the backward compute pass **and** the NCCL
-AllReduce (gradient sync). To estimate pure communication overhead, subtract the 1-node
-`backward_time` from the multi-node `backward_time` — the delta is the AllReduce cost.
+If only Ethernet is available, also try:
+```bash
+export NCCL_ALGO=Ring
+export NCCL_NET_GDR_LEVEL=0
+```
+
+---
+
+## Data I/O
+
+`data_time` in the logs measures how long each rank spends reading a batch from disk.
+With many ranks hitting a shared NFS filesystem simultaneously, this grows with node count.
+Currently hidden behind NCCL overhead — it becomes the next bottleneck once NCCL is fixed.
+
+```bash
+# Pre-copy dataset to fast local storage before the job starts:
+cp -r /path/to/dataset /local1/
+
+# Or use LMDB format, which has much faster random-access reads.
+```
 
 ---
 
@@ -124,13 +159,17 @@ AllReduce (gradient sync). To estimate pure communication overhead, subtract the
 All parameters are set at the top of each job script:
 
 ```bash
-MAX_STEPS=200       # number of steps to run (increase for more stable averages)
+MAX_STEPS=200       # number of optimizer steps to run
 MICRO_BATCH_SIZE=1  # per-GPU batch size
 ACCUMULATIVE_COUNTS=4
-DATASETS="handyvqa" # change to any registry name from data/registry.json
+DATASETS="handyvqa"
 ```
 
-To benchmark connector-only training (frozen ViT + LLM, as in the original multinode job):
+Note: each rank processes `MICRO_BATCH_SIZE × ACCUMULATIVE_COUNTS × MAX_STEPS` samples.
+With more GPUs the **global batch size** scales up, so the same 200 steps consume more
+data in total — but the per-rank workload stays constant.
+
+To benchmark connector-only training (frozen ViT + LLM):
 ```bash
 EXTRA_ARGS="--freeze-vit --freeze-llm"
 ```
@@ -144,9 +183,13 @@ multinode_bench/
 └── results/
     ├── bench_1node/
     │   └── <timestamp>/
-    │       ├── run.log        ← full output with per-step timings
-    │       ├── datasets.json  ← dataset config used
-    │       └── bench_1node.sh ← copy of job script
+    │       ├── run.log              ← full output with per-step timings (all ranks)
+    │       ├── datasets.json        ← dataset config used
+    │       ├── bench_1node.sh       ← copy of job script
+    │       └── <timestamp2>/
+    │           ├── rank0.log        ← per-rank log (rank 0)
+    │           ├── rank1.log
+    │           └── ...
     ├── bench_2node/
     │   └── <timestamp>/
     └── bench_4node/
