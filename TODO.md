@@ -1,32 +1,35 @@
 # Multinode Benchmark — TODO
 
-Ordered by priority based on benchmark results
-(bench_1node: 1.82s/step, bench_2node: 18.6s/step, bench_4node: 22.0s/step).
+Ordered by priority based on benchmark results.
+
+Current best numbers (260418, IB RDMA confirmed, but only one HCA used):
+- bench_1node: 1.82s/step
+- bench_2node: 22.4s/step  (4.1% scaling efficiency)
+- bench_4node: 27.1s/step  (1.7% scaling efficiency)
 
 ---
 
-## 1. Re-run benchmarks with NCCL using IB RDMA [CRITICAL — ready to test]
+## 1. Re-run benchmarks with both IB HCAs enabled [CRITICAL — ready to test]
 
-**Root cause:** Previous experiments had `NCCL_SOCKET_IFNAME=ibp56s0`, but that
-interface does not exist on this cluster. The correct altname is `ibp35s0` (`ibs1`).
-NCCL silently fell back to `bond0` — bonded 1GbE Ethernet — causing ~7.5s of
-AllReduce overhead per step and 2–4% scaling efficiency.
+**Root cause:** Compute nodes have **two** IB HCAs (`mlx5_0` and `mlx5_1`, 400 Gbps HDR
+each), but `_common.sh` was pinning to `mlx5_0` only — using half the available bandwidth.
 
-**Cluster network facts:**
-- IB HCA: `mlx5_0` (Mellanox ConnectX, active MTU 4096)
-- IPoIB interface: `ibs1` / `ibp35s0` (MTU 2044)
-- `bond0`: two bonded 1GbE links (MTU 1500) — previous fallback, too slow
+**Discovery method:** Running `diag.sh` on an actual compute node vs the login node.
+The login node (`qes04`) has different interface names (`ibs1`/`ibp35s0`, one HCA only),
+which led to an incorrect diagnosis in the previous iteration.
 
 **Fix applied in `_common.sh`:**
-- Removed `NCCL_SOCKET_IFNAME=bond0` (was causing the fallback)
-- Added `NCCL_IB_HCA=mlx5_0` to pin the IB HCA explicitly
-- Added `NCCL_DEBUG=INFO` to confirm IB is used at runtime
+- Changed `NCCL_IB_HCA=mlx5_0` → `NCCL_IB_HCA=mlx5_0,mlx5_1`
+- Added `NCCL_SOCKET_IFNAME=ibp56s0` (correct IPoIB interface name on compute nodes)
+
+**Expected impact:** Doubling IB bandwidth should reduce AllReduce cost and the large
+unaccounted overhead (~7-9s/step on 2-node/4-node) that appeared in the 260418 runs.
 
 **Verification:** After re-running, check `run.log` for:
 ```
 [0] NCCL INFO Using network IB    ← correct
-[0] NCCL INFO Using network Socket ← still falling back, investigate further
 ```
+And compare step times and unaccounted overhead against 260418 baseline.
 
 ---
 
@@ -43,25 +46,25 @@ behind NCCL overhead; will become the dominant bottleneck once NCCL is fixed.
 
 ---
 
-## 3. Investigate and reduce unaccounted overhead [MEDIUM]
+## 3. Investigate and reduce unaccounted overhead [MEDIUM — re-check after item 1]
 
-**Finding:** A growing fraction of step time is not attributed to any logged phase:
-- bench_1node: 0.30s (16% of step)
-- bench_2node: 1.98s (11%)
-- bench_4node: 3.74s (17%)
+**Finding:** Step time significantly exceeds the sum of logged phases:
+- bench_1node/260418: ~0.34s (18% of step)
+- bench_2node/260418: ~7.44s (33% of step)
+- bench_4node/260418: ~9.72s (36% of step)
 
-Likely sources: MPI barrier synchronization, ZeRO-2 parameter gather/scatter.
-May reduce significantly after fixing NCCL (item 1).
+Likely source: ZeRO-2 post-optim parameter allgather (not timed in the training script).
+Expected to improve significantly after enabling both HCAs (item 1).
 
-**Action:** Re-check after item 1. If it persists, add timing instrumentation
-around ZeRO gather/scatter in the training script and check `mpirun --mca` options.
+**Action:** Re-check after item 1. If it persists, add timing instrumentation around
+the ZeRO-2 allgather in the training script.
 
 ---
 
 ## 4. Monitor step time variance after fixing NCCL [LOW]
 
-**Finding:** Step time CV is 37% on 2-node and 44% on 4-node. Expected to drop
-once NCCL uses IB RDMA instead of 1GbE Ethernet.
+**Finding:** Step time CV is 29% on 2-node and 35% on 4-node (260418).
+Expected to drop once both HCAs are used.
 
 **Action:** Re-run after item 1 and check if variance drops below 15%.
 
@@ -69,7 +72,7 @@ once NCCL uses IB RDMA instead of 1GbE Ethernet.
 
 ## 5. Forward pass load imbalance [LOW / MONITOR]
 
-**Finding:** `forward_time` std across ranks is ~6-7% — not a significant problem.
+**Finding:** `forward_time` std across ranks is ~5-7% — not a significant problem.
 
 **Action:** No immediate action needed. Re-check after fixing NCCL; if imbalance
 grows above 20%, tighten group-by-length bin sizes or consider sequence packing.
@@ -81,3 +84,7 @@ grows above 20%, tighten group-by-length bin sizes or consider sequence packing.
 - **analyze.py** updated to use per-rank logs for true wall-clock step time
   (max across ranks), with AllReduce overhead, load imbalance, unaccounted time,
   and prioritized recommendations.
+- **NCCL IB RDMA confirmed** active on all runs via `NCCL_DEBUG=INFO`.
+- **diag.sh** added to collect network/NCCL diagnostics from any node.
+- **Two-HCA discovery:** compute nodes have `mlx5_0` + `mlx5_1`; previous config
+  used only `mlx5_0`. Fixed by setting `NCCL_IB_HCA=mlx5_0,mlx5_1`.

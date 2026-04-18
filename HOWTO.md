@@ -115,14 +115,19 @@ Prioritized list of bottlenecks with concrete fix commands.
 
 ## Network interface (NCCL)
 
-**Cluster network facts:**
-- IB HCA: `mlx5_0` (Mellanox ConnectX, active MTU 4096)
-- IPoIB interface: `ibs1` / `ibp35s0` (MTU 2044)
-- `bond0`: two bonded 1GbE links (MTU 1500) — too slow for NCCL
+**Cluster network facts (compute nodes — qhXXX):**
+- IB HCAs: `mlx5_0` **and** `mlx5_1` (MT4129 ConnectX, 400 Gbps HDR each, active MTU 4096)
+- IPoIB interface: `ibp56s0` (10.0.13.x/16, MTU 2044)
+- No `bond0` on compute nodes
 
-`_common.sh` sets `NCCL_IB_HCA=mlx5_0` to pin the IB HCA and lets NCCL use
-IB RDMA verbs directly (the fastest path). `NCCL_DEBUG=INFO` is also set so
-the selected transport is printed at job startup.
+> **Important:** the login node (`qes04`) has **different** interface names (`ibs1` / `ibp35s0`,
+> only one HCA). Always run network diagnostics on an actual compute node, not the login node.
+> Use `diag.sh` for this purpose.
+
+`_common.sh` sets `NCCL_IB_HCA=mlx5_0,mlx5_1` so NCCL stripes AllReduce across both
+400 Gbps links (up to 800 Gbps effective bandwidth). `NCCL_SOCKET_IFNAME=ibp56s0` sets
+the IPoIB socket interface used for bootstrap and as a fallback transport.
+`NCCL_DEBUG=INFO` prints the selected transport at job startup.
 
 **Verify IB is being used** by checking `run.log` after a job completes:
 ```bash
@@ -131,14 +136,11 @@ grep "Using network" results/bench_2node/*/run.log
 # [0] NCCL INFO Using network IB
 ```
 
-**If NCCL falls back to Socket** (e.g. after a cluster change), diagnose with:
+**If NCCL falls back to Socket**, run `diag.sh` on a compute node and check:
 ```bash
 ibv_devinfo | grep -E "hca_id|port_state|active_mtu"
-ip link show | grep -E "^[0-9]+: (ib|mlx)"
+ip link show ibp56s0
 ```
-
-> **Note:** `NCCL_SOCKET_IFNAME` controls only the TCP socket *fallback* transport,
-> not IB RDMA. For IB performance, `NCCL_IB_HCA` is the correct knob.
 
 ---
 

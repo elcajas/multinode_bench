@@ -34,18 +34,17 @@ export DISABLE_ADDMM_CUDA_LT=1
 # Use cuDNN heuristic mode B for convolution algorithm selection
 export TORCH_CUDNN_USE_HEURISTIC_MODE_B=1
 # Inter-node NCCL transport.
-# IB HCA: mlx5_0 (Mellanox ConnectX, active MTU 4096).
-# IPoIB interface: ibs1 (altname ibp35s0), MTU 2044.
-# bond0 is bonded 1GbE Ethernet — too slow, never use for NCCL.
+# Compute nodes have TWO IB HCAs: mlx5_0 and mlx5_1 (MT4129, 400 Gbps HDR each).
+# IPoIB interface on compute nodes: ibp56s0 (10.0.13.x/16, MTU 2044).
+# Note: login node (qes04) has different interface names (ibs1/ibp35s0) — do not
+# use the login node to diagnose compute node network config.
 #
-# Previous runs had NCCL_SOCKET_IFNAME=ibp56s0, which does not exist on this
-# cluster (correct altname is ibp35s0). NCCL silently fell back to bond0,
-# causing ~7.5s AllReduce overhead.
-#
-# With NCCL_SOCKET_IFNAME unset, NCCL auto-detects mlx5_0 and uses IB RDMA
-# verbs directly. NCCL_IB_HCA pins the HCA explicitly to avoid ambiguity.
+# Pin both HCAs so NCCL can stripe AllReduce across both links (up to 800 Gbps).
+# NCCL_SOCKET_IFNAME sets the IPoIB socket fallback interface (used for bootstrap
+# and as fallback if IB RDMA is unavailable — not the primary data transport).
 # NCCL_DEBUG=INFO prints the selected transport at startup — confirm "Using network IB".
-export NCCL_IB_HCA=mlx5_0
+export NCCL_IB_HCA=mlx5_0,mlx5_1
+export NCCL_SOCKET_IFNAME=ibp56s0
 export NCCL_DEBUG=INFO
 # Keep Triton kernel cache local
 export TRITON_CACHE_DIR="tmp/triton"
