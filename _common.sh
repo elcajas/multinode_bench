@@ -171,6 +171,7 @@ run_training() {
       --seed 42 \
       --checkpoint-interval ${CHECKPOINT_INTERVAL} \
       --checkpoint-drop-optimizer \
+      --no-save \
       --shard-strategy 'zero2' \
       --group-by-length \
       --frame_sampling_method middle \
@@ -203,6 +204,7 @@ run_training() {
       --seed 42 \
       --checkpoint-interval ${CHECKPOINT_INTERVAL} \
       --checkpoint-drop-optimizer \
+      --no-save \
       --shard-strategy 'zero2' \
       --group-by-length \
       --frame_sampling_method middle \

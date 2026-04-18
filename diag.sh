@@ -55,7 +55,20 @@ except Exception as e:
 " 2>/dev/null || echo "python3/torch not available (run after: conda activate iv25)"
 
 echo ""
-echo "[7. Loaded modules]"
+echo "[7. GPU topology (NVLink / PCIe)]"
+nvidia-smi topo -m 2>/dev/null || echo "nvidia-smi not available"
+
+echo ""
+echo "[8. GPU Direct RDMA (GDR)]"
+# nv_peer_mem or nvidia_peermem kernel module enables GDR
+lsmod 2>/dev/null | grep -E "nv_peer_mem|nvidia_peermem" \
+    && echo "  GDR kernel module loaded" \
+    || echo "  nv_peer_mem / nvidia_peermem NOT found — GDR likely disabled"
+# GDR copy device
+ls /dev/gdrdrv 2>/dev/null && echo "  /dev/gdrdrv present" || echo "  /dev/gdrdrv not present"
+
+echo ""
+echo "[9. Loaded modules]"
 module list 2>&1 | grep -v "^$" || echo "(module not available)"
 
 echo ""
