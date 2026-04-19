@@ -2,34 +2,37 @@
 
 Ordered by priority based on benchmark results.
 
-Current best numbers (260418, IB RDMA confirmed, but only one HCA used):
+Current best numbers (260419, IB RDMA + dual HCA confirmed, GDR still disabled):
 - bench_1node: 1.82s/step
-- bench_2node: 22.4s/step  (4.1% scaling efficiency)
-- bench_4node: 27.1s/step  (1.7% scaling efficiency)
+- bench_2node: 18.6s/step  (4.9% scaling efficiency)
+- bench_4node: 22.1s/step  (2.1% scaling efficiency)
 
 ---
 
-## 1. Re-run benchmarks with both IB HCAs enabled [CRITICAL — ready to test]
+## 1. Enable GPU Direct RDMA via NCCL_NET_GDR_LEVEL=4 [CRITICAL — ready to test]
 
-**Root cause:** Compute nodes have **two** IB HCAs (`mlx5_0` and `mlx5_1`, 400 Gbps HDR
-each), but `_common.sh` was pinning to `mlx5_0` only — using half the available bandwidth.
+**Root cause:** GDR hardware is present (`nvidia_peermem` loaded, `/dev/gdrdrv` present)
+but NCCL is NOT using it. Confirmed by `GDR 0` in NCCL logs:
+```
+NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+```
 
-**Discovery method:** Running `diag.sh` on an actual compute node vs the login node.
-The login node (`qes04`) has different interface names (`ibs1`/`ibp35s0`, one HCA only),
-which led to an incorrect diagnosis in the previous iteration.
+**Why:** GPU-NIC PCIe topology on compute nodes is **NODE** level (two PCIe host bridges
+within the same NUMA node — confirmed via `nvidia-smi topo -m`). NCCL's default
+`NCCL_NET_GDR_LEVEL=3` (PHB = single host bridge) excludes NODE-level paths, so
+gradients bounce through CPU RAM instead of going GPU→NIC directly.
 
 **Fix applied in `_common.sh`:**
-- Changed `NCCL_IB_HCA=mlx5_0` → `NCCL_IB_HCA=mlx5_0,mlx5_1`
-- Added `NCCL_SOCKET_IFNAME=ibp56s0` (correct IPoIB interface name on compute nodes)
+- Added `NCCL_NET_GDR_LEVEL=4` (NODE) — enables GDR for the actual GPU-NIC topology
 
-**Expected impact:** Doubling IB bandwidth should reduce AllReduce cost and the large
-unaccounted overhead (~7-9s/step on 2-node/4-node) that appeared in the 260418 runs.
+**Expected impact:** GDR eliminates the CPU-bounce path for gradient transfers.
+AllReduce is currently 7.5s/step (40% of 2-node wall-clock) — should drop significantly.
 
 **Verification:** After re-running, check `run.log` for:
 ```
-[0] NCCL INFO Using network IB    ← correct
+NCCL INFO Connected all rings, use ring PXN 0 GDR 1    ← GDR active
 ```
-And compare step times and unaccounted overhead against 260418 baseline.
+And compare step times against 260419 baseline.
 
 ---
 
@@ -88,3 +91,6 @@ grows above 20%, tighten group-by-length bin sizes or consider sequence packing.
 - **diag.sh** added to collect network/NCCL diagnostics from any node.
 - **Two-HCA discovery:** compute nodes have `mlx5_0` + `mlx5_1`; previous config
   used only `mlx5_0`. Fixed by setting `NCCL_IB_HCA=mlx5_0,mlx5_1`.
+- **GDR disabled discovered (260419):** `nvidia_peermem` + `/dev/gdrdrv` present but
+  NCCL logs showed `GDR 0`. GPU-NIC topology is NODE level; default GDR level (PHB)
+  excludes it. Fixed by adding `NCCL_NET_GDR_LEVEL=4`.

@@ -43,8 +43,14 @@ export TORCH_CUDNN_USE_HEURISTIC_MODE_B=1
 # NCCL_SOCKET_IFNAME sets the IPoIB socket fallback interface (used for bootstrap
 # and as fallback if IB RDMA is unavailable — not the primary data transport).
 # NCCL_DEBUG=INFO prints the selected transport at startup — confirm "Using network IB".
+# NCCL_NET_GDR_LEVEL: GPU-NIC PCIe topology on compute nodes is "NODE" level (two PCIe
+# host bridges within the same NUMA node). NCCL's default GDR level is 3 (PHB = single
+# host bridge), which silently disables GDR for NODE topology — confirmed by "GDR 0" in
+# NCCL logs. Setting to 4 (NODE) enables GPU Direct RDMA so gradients go GPU→NIC directly
+# instead of GPU→CPU RAM→NIC. Verify after re-run: "GDR 1" in NCCL logs.
 export NCCL_IB_HCA=mlx5_0,mlx5_1
 export NCCL_SOCKET_IFNAME=ibp56s0
+export NCCL_NET_GDR_LEVEL=4
 export NCCL_DEBUG=INFO
 # Keep Triton kernel cache local
 export TRITON_CACHE_DIR="tmp/triton"
