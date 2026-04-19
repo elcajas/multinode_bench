@@ -118,28 +118,105 @@ Prioritized list of bottlenecks with concrete fix commands.
 **Cluster network facts (compute nodes — qhXXX):**
 - IB HCAs: `mlx5_0` **and** `mlx5_1` (MT4129 ConnectX, 400 Gbps HDR each, active MTU 4096)
 - IPoIB interface: `ibp56s0` (10.0.13.x/16, MTU 2044)
+- GPU-NIC PCIe topology: NODE level (same NUMA node, different PCIe host bridges)
 - No `bond0` on compute nodes
 
 > **Important:** the login node (`qes04`) has **different** interface names (`ibs1` / `ibp35s0`,
 > only one HCA). Always run network diagnostics on an actual compute node, not the login node.
 > Use `diag.sh` for this purpose.
 
-`_common.sh` sets `NCCL_IB_HCA=mlx5_0,mlx5_1` so NCCL stripes AllReduce across both
-400 Gbps links (up to 800 Gbps effective bandwidth). `NCCL_SOCKET_IFNAME=ibp56s0` sets
-the IPoIB socket interface used for bootstrap and as a fallback transport.
-`NCCL_DEBUG=INFO` prints the selected transport at job startup.
+`_common.sh` sets:
+- `NCCL_IB_HCA=mlx5_0,mlx5_1` — stripes AllReduce across both 400 Gbps links
+- `NCCL_SOCKET_IFNAME=ibp56s0` — IPoIB interface for bootstrap/fallback
+- `NCCL_NET_GDR_LEVEL=4` — enables GPU Direct RDMA despite NODE-level PCIe topology
+  (NCCL's default level 3/PHB silently disables GDR for this topology)
+- `NCCL_DEBUG=INFO` — prints transport selection at startup
 
-**Verify IB is being used** by checking `run.log` after a job completes:
+**Verify IB + GDR are active** by checking `run.log` after a job completes:
 ```bash
-grep "Using network" results/bench_2node/*/run.log
+grep "Using network\|GDR" results/bench_2node/*/run.log
 # Should show:
-# [0] NCCL INFO Using network IB
+# NCCL INFO Using network IB
+# NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+# NCCL INFO Channel 00/0 : ... via NET/IB/0/GDRDMA
 ```
 
-**If NCCL falls back to Socket**, run `diag.sh` on a compute node and check:
+**Measured peak bandwidth (nccl-tests, 260419):**
+- AllReduce bus bandwidth: ~80 GB/s at large message sizes (80% of 100 GB/s theoretical)
+- The IB fabric is healthy — the training bottleneck is NOT the network.
+
+---
+
+## Bottleneck analysis (as of 260419)
+
+The multi-node scaling is poor (5% efficiency at 2-node) due to **FSDP2 per-layer
+AllGather overhead**, not network bandwidth. Here is the full chain of investigation:
+
+### What we measured
+
+| Phase | 1-node | 2-node | Overhead |
+|---|---|---|---|
+| forward_time | 0.54 s | 6.5 s | +5.96 s |
+| backward_time | 0.80 s | 8.33 s | +7.53 s |
+| Total step | 1.82 s | 18.8 s | +17 s |
+
+### Why forward_time is 12× slower on 2-node
+
+The training script uses PyTorch FSDP2 (`fully_shard`) with **one FSDP unit per LLM
+decoder layer**. This means every layer's forward pass triggers a separate NCCL AllGather
+collective to reconstruct that layer's parameters from sharded form across all ranks.
+
+For the InternVL2-8B model (32 LLM layers + 1 ViT + 1 top-level):
+- **34 sequential NCCL AllGather collectives per forward pass**
+- Each AllGather is ~437 MB and takes ~9 ms at fabric speed
+- But FSDP2 Python dispatch + CUDA synchronization adds ~165 ms fixed overhead per collective
+- **34 × 175 ms = 5.95 s** — matches exactly the observed forward overhead
+
+The same applies to backward: 34 ReduceScatter collectives × ~220 ms = **7.5 s**.
+
+### Why GDR and dual-HCA didn't help
+
+- `NCCL_IB_HCA=mlx5_0,mlx5_1` doubled bandwidth → helped only for the 9 ms data
+  transfer portion of each collective, not the 165 ms overhead
+- `NCCL_NET_GDR_LEVEL=4` eliminated the CPU-bounce path → same reason: only saves on
+  the data transfer, not the per-collective fixed overhead
+- nccl-tests confirmed the fabric reaches 80 GB/s — the network is not the bottleneck
+
+### Fix: FSDP layer grouping
+
+Wrap the entire LLM as a single FSDP unit instead of per-layer wrapping:
+
+```
+Current:  34 AllGathers × 175 ms = 5.95 s forward overhead
+Fixed:     3 AllGathers × ~500 ms = ~1.5 s forward overhead  (estimated 4× improvement)
+```
+
+Implementation: `--fsdp-group-size 0` flag in `unify_internvl2_train_r16.py`
+(0 = whole LLM as one unit, 1 = current per-layer default).
+
+---
+
+## ECC hardware error on qh138
+
+An **uncorrectable ECC error** was detected on node `qh138` during nccl-tests (260419):
+```
+qh138: Test CUDA failure 'uncorrectable ECC error encountered'
+```
+
+An uncorrectable ECC error means a GPU DRAM cell has permanently failed. This is a
+**hardware fault**:
+- Training jobs that ran on `qh138` may have produced silently corrupted results
+- The GPU may pass lighter workloads but fail under memory pressure
+- **Action:** Report to cluster admins and avoid `qh138` until confirmed repaired
+
+Check ECC error counts:
 ```bash
-ibv_devinfo | grep -E "hca_id|port_state|active_mtu"
-ip link show ibp56s0
+nvidia-smi -q | grep -A3 "ECC Errors"
+```
+
+To exclude `qh138` from PBS jobs, add to the job script:
+```bash
+#PBS -l select=2:ncpus=...:host!=qh138
 ```
 
 ---
