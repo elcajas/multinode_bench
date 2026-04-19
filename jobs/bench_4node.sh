@@ -16,7 +16,7 @@ ACCUMULATIVE_COUNTS=4
 EPOCHS=99
 MAX_STEPS=200
 
-EXTRA_ARGS="--fsdp-group-size 0"
+EXTRA_ARGS="--fsdp-group-size 0 --hybrid-shard"
 # EXTRA_ARGS="--freeze-vit --freeze-llm"
 
 JOB_NAME="bench_4node"
