@@ -70,6 +70,17 @@ export TRANSFORMERS_OFFLINE=1
 NODEFILE_UNIQUE=$(mktemp)
 sort -u "$PBS_NODEFILE" > "$NODEFILE_UNIQUE"
 NODES=$(wc -l < "$NODEFILE_UNIQUE")
+
+# Abort if any allocated node is known to have an uncorrectable ECC error.
+# Add new bad nodes to this list as they are discovered.
+BAD_NODES="qh138 qh129"
+for bad in $BAD_NODES; do
+    if grep -qw "$bad" "$NODEFILE_UNIQUE"; then
+        echo "ERROR: allocated node $bad has a known ECC hardware fault. Aborting."
+        echo "Please report $bad to cluster admins and resubmit."
+        exit 1
+    fi
+done
 MASTER_ADDR=$(head -n 1 "$NODEFILE_UNIQUE")
 
 # GPU count auto-detection (in order of reliability):

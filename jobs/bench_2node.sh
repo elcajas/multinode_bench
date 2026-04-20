@@ -4,7 +4,7 @@
 #              from /groups/input/internvideo25/internvideo_2_5/
 #PBS -N bench_2node
 #PBS -q rt_HF
-#PBS -l select=2:host!=qh138:host!=qh129
+#PBS -l select=2
 #PBS -l walltime=02:00:00
 #PBS -j oe
 #PBS -o logs/bench_2node/
