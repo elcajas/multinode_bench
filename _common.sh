@@ -70,6 +70,7 @@ export TRANSFORMERS_OFFLINE=1
 NODEFILE_UNIQUE=$(mktemp)
 sort -u "$PBS_NODEFILE" > "$NODEFILE_UNIQUE"
 NODES=$(wc -l < "$NODEFILE_UNIQUE")
+echo "Allocated nodes: $(tr '\n' ' ' < "$NODEFILE_UNIQUE")"
 
 # Abort if any allocated node is known to have an uncorrectable ECC error.
 # Add new bad nodes to this list as they are discovered.
