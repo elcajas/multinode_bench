@@ -58,20 +58,24 @@ Once at least one job has finished:
 ```bash
 cd /groups/input/internvideo25/multinode_bench
 
-# Auto-discover all completed runs and compare:
-python3 analyze.py --auto
+# Fast single-run summary (max across ranks, mean/std/CV, scaling efficiency):
+python3 parse_run.py results/bench_2node/<timestamp>/run.log
 
-# Or point to specific run directories:
+# Compare multiple runs side-by-side:
+python3 parse_run.py results/bench_2node_gs*/*/run.log
+
+# Full multi-run analysis with breakdown and recommendations:
+python3 analyze.py --auto
 python3 analyze.py \
     "1-node=results/bench_1node/<timestamp>" \
-    "2-node=results/bench_2node/<timestamp>" \
-    "4-node=results/bench_4node/<timestamp>"
+    "2-node=results/bench_2node/<timestamp>"
 ```
 
-The analyzer uses **per-rank log files** when available
-(`results/<job>/<timestamp>/<timestamp2>/rank*.log`), measuring wall-clock step
-time as `max(time across all ranks)`. Falls back to `run.log` (rank-0 only) if
-per-rank logs are absent.
+`parse_run.py` accepts a run.log, a PBS .OU file, or a run directory.
+It measures wall-clock step time as `max(time across all ranks)`.
+
+`analyze.py` uses per-rank log files when available
+(`results/<job>/<timestamp>/<timestamp2>/rank*.log`), falling back to `run.log`.
 
 ---
 
@@ -110,17 +114,23 @@ Efficiency = actual_speedup / ideal_speedup
 
 ---
 
-## Current configuration (bench_2node / bench_4node)
+## Current configuration (bench_2node)
+
+`bench_2node.sh` accepts `GROUP_SIZE` via `qsub -v` to sweep `--fsdp-group-size`:
 
 ```bash
-EXTRA_ARGS="--fsdp-group-size 0 --hybrid-shard --shard-strategy full"
+# Submit a single variant:
+qsub -v GROUP_SIZE=4 jobs/bench_2node.sh   # → results/bench_2node_gs4/
+
+# Submit the full sweep (gs=0,4,8,16) in parallel:
+bash jobs/submit_sweep.sh
 ```
 
 | Flag | What it does |
 |---|---|
-| `--fsdp-group-size 0` | Wraps entire LLM as one FSDP unit (no per-layer AllGather) |
-| `--hybrid-shard` | HSDP: shard within node (NVLink), replicate across nodes (IB gradient sync only) |
-| `--shard-strategy full` | ZeRO-3: reshard after forward, so both AllGather and ReduceScatter stay on NVLink |
+| `--fsdp-group-size N` | N layers per FSDP unit. 0=whole LLM, 1=per-layer, 4/8/16=intermediate |
+| `--hybrid-shard` | HSDP 2D mesh: shard within node (NVLink), replicate across nodes (IB AllReduce) |
+| `--shard-strategy full` | ZeRO-3: reshard after forward — AllGather + ReduceScatter stay on NVLink |
 
 ---
 
