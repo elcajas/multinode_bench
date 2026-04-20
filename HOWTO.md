@@ -28,6 +28,9 @@ qsub jobs/bench_4node.sh
 
 You can submit all three at once — they are independent.
 
+Each job runs for `MAX_STEPS=20` optimizer steps then exits (~4 minutes wall-clock).
+Increase `MAX_STEPS` in the job script if you need more stable averages.
+
 ---
 
 ## Step 2 — Monitor progress
@@ -37,11 +40,14 @@ qstat                        # check job status (Q=queued, R=running, E=ending)
 qstat -f <job_id>            # full details for a specific job
 
 # Tail the live log of a running job:
-tail -f multinode_bench/results/bench_1node/*/run.log
+tail -f multinode_bench/results/bench_2node/*/run.log
 ```
 
-Each job runs for exactly `MAX_STEPS` optimizer steps then exits (default 200).
-Expected wall-clock time per job: 10–30 min depending on GPU count and configuration.
+The log header prints the allocated nodes, e.g.:
+```
+Allocated nodes: qh131 qh135
+```
+Check this immediately — if a known-bad node appears (qh129, qh138), the job will abort with an error message and you can resubmit.
 
 ---
 
@@ -83,33 +89,38 @@ Shows what fraction of each step is spent in each phase:
 |---|---|
 | `data` | Reading samples from disk / LMDB |
 | `prepare` | Moving tensors to GPU |
-| `forward` | Forward pass (compute) |
-| `backward` | Backward pass **+ NCCL AllReduce** (gradient sync across GPUs/nodes) |
-| `optim` | Optimizer step (ZeRO parameter update) |
-| `unaccnt` | Unaccounted time (MPI barriers, ZeRO gather/scatter overhead) |
+| `forward` | Forward pass (compute + AllGather params) |
+| `backward` | Backward pass (compute + gradient ReduceScatter/AllReduce) |
+| `optim` | Optimizer step |
+| `unaccnt` | Unaccounted time (MPI barriers, ZeRO overhead) |
 
 ### 3. AllReduce overhead
 Isolates the inter-node communication cost:
 ```
 allreduce_cost = backward_time[run] − backward_time[1-node baseline]
 ```
-The 1-node backward has no inter-node AllReduce, so the delta is pure communication overhead.
 
-### 4. Forward pass load imbalance
-`imbalance% = std(forward_time across ranks) / max(forward_time)` per step.
-High values mean `--group-by-length` is assigning very different sequence lengths
-to different ranks — the slowest rank stalls everyone at the AllReduce barrier.
-
-### 5. Scaling efficiency
+### 4. Scaling efficiency
 ```
 Efficiency = actual_speedup / ideal_speedup
 ```
 - **> 80%** — good scaling
-- **50–80%** — moderate; check the flagged bottleneck phase
+- **50–80%** — moderate
 - **< 50%** — poor scaling
 
-### 6. Recommendations
-Prioritized list of bottlenecks with concrete fix commands.
+---
+
+## Current configuration (bench_2node / bench_4node)
+
+```bash
+EXTRA_ARGS="--fsdp-group-size 0 --hybrid-shard --shard-strategy full"
+```
+
+| Flag | What it does |
+|---|---|
+| `--fsdp-group-size 0` | Wraps entire LLM as one FSDP unit (no per-layer AllGather) |
+| `--hybrid-shard` | HSDP: shard within node (NVLink), replicate across nodes (IB gradient sync only) |
+| `--shard-strategy full` | ZeRO-3: reshard after forward, so both AllGather and ReduceScatter stay on NVLink |
 
 ---
 
@@ -119,120 +130,70 @@ Prioritized list of bottlenecks with concrete fix commands.
 - IB HCAs: `mlx5_0` **and** `mlx5_1` (MT4129 ConnectX, 400 Gbps HDR each, active MTU 4096)
 - IPoIB interface: `ibp56s0` (10.0.13.x/16, MTU 2044)
 - GPU-NIC PCIe topology: NODE level (same NUMA node, different PCIe host bridges)
-- No `bond0` on compute nodes
 
 > **Important:** the login node (`qes04`) has **different** interface names (`ibs1` / `ibp35s0`,
 > only one HCA). Always run network diagnostics on an actual compute node, not the login node.
-> Use `diag.sh` for this purpose.
 
 `_common.sh` sets:
-- `NCCL_IB_HCA=mlx5_0,mlx5_1` — stripes AllReduce across both 400 Gbps links
+- `NCCL_IB_HCA=mlx5_0,mlx5_1` — stripes across both 400 Gbps links
 - `NCCL_SOCKET_IFNAME=ibp56s0` — IPoIB interface for bootstrap/fallback
-- `NCCL_NET_GDR_LEVEL=4` — enables GPU Direct RDMA despite NODE-level PCIe topology
-  (NCCL's default level 3/PHB silently disables GDR for this topology)
+- `NCCL_NET_GDR_LEVEL=4` — enables GPU Direct RDMA for NODE-level PCIe topology
 - `NCCL_DEBUG=INFO` — prints transport selection at startup
 
-**Verify IB + GDR are active** by checking `run.log` after a job completes:
-```bash
-grep "Using network\|GDR" results/bench_2node/*/run.log
-# Should show:
-# NCCL INFO Using network IB
-# NCCL INFO Connected all rings, use ring PXN 0 GDR 1
-# NCCL INFO Channel 00/0 : ... via NET/IB/0/GDRDMA
-```
-
 **Measured peak bandwidth (nccl-tests, 260419):**
-- AllReduce bus bandwidth: ~80 GB/s at large message sizes (80% of 100 GB/s theoretical)
-- The IB fabric is healthy — the training bottleneck is NOT the network.
+- AllReduce bus bandwidth: ~80 GB/s (80% of 100 GB/s theoretical)
+- The IB fabric is healthy — the bottleneck is cross-node collective overhead, not bandwidth.
 
 ---
 
-## Bottleneck analysis (as of 260419)
+## Bottleneck analysis (as of 260420)
 
-The multi-node scaling is poor (5% efficiency at 2-node) due to **FSDP2 per-layer
-AllGather overhead**, not network bandwidth. Here is the full chain of investigation:
+### Benchmark progression
 
-### What we measured
+| Config | forward | backward | total | notes |
+|---|---|---|---|---|
+| 1-node baseline | 0.54 s | 0.80 s | 1.82 s | no cross-node comms |
+| 2-node ZeRO-2 flat mesh | ~5.5–7.5 s | ~8.5–9.2 s | ~18 s | per-layer IB AllGather (fwd) + IB ReduceScatter (bwd); high variance |
+| 2-node ZeRO-2 + fsdp_group_size=0 | 7.4 s | 6.0 s | 17.8 s | 1 IB AllGather in fwd (lost pipelining); backward improved |
+| 2-node ZeRO-2 + hybrid_shard | 3.8 s | 7.6 s | 17.4 s | fwd AllGather on NVLink ✓; bwd IB gradient AllReduce is new bottleneck |
+| 2-node ZeRO-3 + hybrid_shard | ~3–4 s | ~7–8 s | ~16 s | fwd NVLink ✓; bwd IB AllReduce still bottleneck — forward improved ~40% vs flat mesh, backward barely moved across all configs |
 
-| Phase | 1-node | 2-node | Overhead |
-|---|---|---|---|
-| forward_time | 0.54 s | 6.5 s | +5.96 s |
-| backward_time | 0.80 s | 8.33 s | +7.53 s |
-| Total step | 1.82 s | 18.8 s | +17 s |
+### Why ZeRO-3 + hybrid sharding is the right fix
 
-### Why forward_time is 12× slower on 2-node
-
-The training script uses PyTorch FSDP2 (`fully_shard`) with **one FSDP unit per LLM
-decoder layer**. This means every layer's forward pass triggers a separate NCCL AllGather
-collective to reconstruct that layer's parameters from sharded form across all ranks.
-
-For the InternVL2-8B model (32 LLM layers + 1 ViT + 1 top-level):
-- **34 sequential NCCL AllGather collectives per forward pass**
-- Each AllGather is ~437 MB and takes ~9 ms at fabric speed
-- But FSDP2 Python dispatch + CUDA synchronization adds ~165 ms fixed overhead per collective
-- **34 × 175 ms = 5.95 s** — matches exactly the observed forward overhead
-
-The same applies to backward: 34 ReduceScatter collectives × ~220 ms = **7.5 s**.
-
-### Why GDR and dual-HCA didn't help
-
-- `NCCL_IB_HCA=mlx5_0,mlx5_1` doubled bandwidth → helped only for the 9 ms data
-  transfer portion of each collective, not the 165 ms overhead
-- `NCCL_NET_GDR_LEVEL=4` eliminated the CPU-bounce path → same reason: only saves on
-  the data transfer, not the per-collective fixed overhead
-- nccl-tests confirmed the fabric reaches 80 GB/s — the network is not the bottleneck
-
-### Fix: FSDP layer grouping
-
-Wrap the entire LLM as a single FSDP unit instead of per-layer wrapping:
+With a flat 1D FSDP mesh (all 8 GPUs), every AllGather and ReduceScatter crosses IB.
+With a 2D hybrid mesh (2 nodes × 4 GPUs), AllGather/ReduceScatter happen within each node over NVLink.
+The only remaining IB traffic is the gradient AllReduce across the 2 replicas — unavoidable,
+but it happens once per FSDP unit per backward, not per layer.
 
 ```
-Current:  34 AllGathers × 175 ms = 5.95 s forward overhead
-Fixed:     3 AllGathers × ~500 ms = ~1.5 s forward overhead  (estimated 4× improvement)
+ZeRO-2 + hybrid:  NVLink AllGather (fwd) + IB AllReduce (bwd, full params) — bwd bottleneck
+ZeRO-3 + hybrid:  NVLink AllGather (fwd) + NVLink ReduceScatter (bwd) + IB AllReduce (bwd, grad shards)
 ```
 
-Implementation: `--fsdp-group-size 0` flag in `unify_internvl2_train_r16.py`
-(0 = whole LLM as one unit, 1 = current per-layer default).
+ZeRO-3 pays a small extra cost (re-gather params each layer) but keeps everything on NVLink.
 
 ---
 
-## ECC hardware error on qh138
+## ECC hardware errors
 
-An **uncorrectable ECC error** was detected on node `qh138` during nccl-tests (260419):
-```
-qh138: Test CUDA failure 'uncorrectable ECC error encountered'
-```
+Two nodes have confirmed uncorrectable ECC errors — hardware faults in GPU DRAM:
 
-An uncorrectable ECC error means a GPU DRAM cell has permanently failed. This is a
-**hardware fault**:
-- Training jobs that ran on `qh138` may have produced silently corrupted results
-- The GPU may pass lighter workloads but fail under memory pressure
-- **Action:** Report to cluster admins and avoid `qh138` until confirmed repaired
+| Node | Discovered | How |
+|---|---|---|
+| qh138 | 260419 nccl-tests | Failed at 512 MB AllReduce |
+| qh129 | 260419 training | Crashed at step 12, GPU 1 (rank 5) |
 
-Check ECC error counts:
+`_common.sh` aborts the job at startup if either node is allocated. Add new bad nodes to the
+`BAD_NODES` list in `_common.sh` as they are discovered.
+
+Report to cluster admins:
 ```bash
+# Run on the suspect node:
 nvidia-smi -q | grep -A3 "ECC Errors"
 ```
 
-To exclude `qh138` from PBS jobs, add to the job script:
-```bash
-#PBS -l select=2:ncpus=...:host!=qh138
-```
-
----
-
-## Data I/O
-
-`data_time` in the logs measures how long each rank spends reading a batch from disk.
-With many ranks hitting a shared NFS filesystem simultaneously, this grows with node count.
-Currently hidden behind NCCL overhead — it becomes the next bottleneck once NCCL is fixed.
-
-```bash
-# Pre-copy dataset to fast local storage before the job starts:
-cp -r /path/to/dataset /local1/
-
-# Or use LMDB format, which has much faster random-access reads.
-```
+To exclude from PBS jobs, add to `_common.sh`'s `BAD_NODES` list (shell guard approach,
+since PBS Pro does not support chaining multiple `host!=` in a single select statement).
 
 ---
 
@@ -241,15 +202,11 @@ cp -r /path/to/dataset /local1/
 All parameters are set at the top of each job script:
 
 ```bash
-MAX_STEPS=200       # number of optimizer steps to run
+MAX_STEPS=20        # number of optimizer steps (20 is enough for stable timing)
 MICRO_BATCH_SIZE=1  # per-GPU batch size
 ACCUMULATIVE_COUNTS=4
 DATASETS="handyvqa"
 ```
-
-Note: each rank processes `MICRO_BATCH_SIZE × ACCUMULATIVE_COUNTS × MAX_STEPS` samples.
-With more GPUs the **global batch size** scales up, so the same 200 steps consume more
-data in total — but the per-rank workload stays constant.
 
 To benchmark connector-only training (frozen ViT + LLM):
 ```bash
@@ -277,5 +234,3 @@ multinode_bench/
     └── bench_4node/
         └── <timestamp>/
 ```
-
-Each run is self-contained. Re-submitting creates a new timestamped directory.
