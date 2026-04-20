@@ -18,7 +18,7 @@ DATASETS="handyvqa"
 MICRO_BATCH_SIZE=1
 ACCUMULATIVE_COUNTS=4
 EPOCHS=99       # large epoch count so MAX_STEPS is always the binding limit
-MAX_STEPS=200   # stop after 200 optimizer steps; increase for more stable averages
+MAX_STEPS=20    # 20 steps is enough to measure stable step time
 
 # Uncomment to benchmark connector-only training (mirrors the actual multinode use case):
 # EXTRA_ARGS="--freeze-vit --freeze-llm"

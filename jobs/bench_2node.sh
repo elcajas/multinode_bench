@@ -14,9 +14,9 @@ DATASETS="handyvqa"
 MICRO_BATCH_SIZE=1
 ACCUMULATIVE_COUNTS=4
 EPOCHS=99
-MAX_STEPS=200
+MAX_STEPS=20
 
-EXTRA_ARGS="--fsdp-group-size 0 --hybrid-shard"
+EXTRA_ARGS="--fsdp-group-size 0 --hybrid-shard --shard-strategy full"
 # EXTRA_ARGS="--freeze-vit --freeze-llm"
 
 JOB_NAME="bench_2node"
